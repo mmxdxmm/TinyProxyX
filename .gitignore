@@ -1,0 +1,21 @@
+# 构建产物
+build/
+.stage/
+test/classes/
+*.class
+*.dex
+
+# 签名材料：私钥一律不进仓库
+sign/
+*.keystore
+*.jks
+*.p12
+*.pem
+*.key
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+*.iml

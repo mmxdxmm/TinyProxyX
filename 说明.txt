@@ -1,0 +1,292 @@
+TinyProxy X 2.0.2
+
+最低 Android 8.0 / API 26，目标 API 34，arm64-v8a。
+构建：Windows 运行 build.ps1；Linux/macOS 运行 build.sh（同一套 aapt2 + javac
+--release 11 + d8 + zipalign + apksigner，工具链默认 /root/android-sdk 或
+ANDROID_SDK_ROOT 指向的目录）。
+
+【2.0.2：修「http 由 https 槽接管」全挂】
+
+现象：注入节点只填 https_ip（http_ip 留空，也就是「80 端口交给 https 槽接管」）时，
+直播间、网页这类明文 HTTP 全打不开；只走 443 的 HTTPS 正常。
+
+根因在 InjectServer 的分派表。2.0.0 把「选槽 / 选路」压成 USE / GW / PATH 三张表，
+但三张表是在同一个四重循环里顺手写的，循环变量是 **http 槽**的 on/direct/empty，
+而 PATH 的第三维 gw 取的是 **目标槽** 的网关状态。端口 80 交给 https 槽时，目标槽是
+https；而 (slot=0, use=1, gw=1) 这一格只有「http 槽自己有网关」时才会被写到 ——
+那恰好不是接管的情形。结果 PATH[0][1][1] 一直是 int 的默认值 0：
+
+    80 端口 → directTunnel：先给 xray 回 200，然后把客户的明文请求
+    原样倒进免流网关的 443 端口（没有 CONNECT、没有模板）
+
+网关按代理协议解析这一坨，直接不认；xray 那边隧道已经“建立”，于是一直等到超时。
+同一张表还有第二处漏填：PATH[0][0][0] = 2 而不是 0，http_others=off / http_direct=on
+时本来该直连，却仍然进了 http 槽去注入 http_first。
+
+修法：三张表各自整表填满，取值逐格对齐 1.8.2 的 sock5_check ——
+    没有网关 → 一律直连目标，一个字节都不改；
+    有网关   → https 槽发 CONNECT，http 槽逐条改写请求头。
+
+顺带修掉一处握手判定的回归：网关只回 “HTTP/1.1 200\r\n”（不带原因短语）时，
+2.0.1 的 statusOf 把行尾 \r 当成非法字符，整行判 0，于是握手永远失败、连接被关。
+1.8.2 是能过的（substring + trim）。现在数字后面遇到空白或行尾就收尾。
+
+对拍（1.8.2 与 2.0.2 各起实例，比较客户端与网关收到的字节，9 个场景）：
+    https 接管 http（80）、443 CONNECT、无原因短语、IP 直连目标、keep-alive 两请求、
+    http 槽网关改写、http_others=off 直连（真起 80 端口目标）、https_direct
+    —— 9/9 逐字节一致；2.0.1 在同一组里有 1 个场景直接超时、2 个场景字节不同。
+回归：RefactorTest 266 条断言全绿（新增 11 条：分派表 6 格 + 接管端到端 3 条 +
+状态行 2 条），并发冒烟 200 并发 + 300 短连接全通。
+
+【2.0.1：停止按钮的中间态】
+
+点"停 止"之后按钮立刻变成"正在停止…"（浅灰底、灰字），状态标题同时变"正在停止"，
+直到 Control.state 回到 idle 才恢复"启 动"。原因是停机动不动要几秒——热点模式要等
+xray 退出、再把 root 规则逐条回滚——而这几秒里状态栏经常被注入器的报错占着，
+只看标题会以为按钮没点上，于是重复点。现在按钮自己说明状态，标题也保留"正在停止"
+（原来的"正在断开"合并进这一处）。两处提示语统一成"正在停止，请稍候"。
+
+改动只在 MainActivity.refresh 的一个状态分支和两句文案，分支账与 2.0.0 相同（2262）。
+
+【2.0.0：把分支从热路径里拿掉】
+
+一、三个耗时大头
+1. 每连接建线程 → 有界线程池。
+   原来 accept 后 new Thread，下行泵再 new 一个，一条 HTTP 请求两个线程，连接断开
+   就全扔；短连接场景下创建/销毁比干活还贵。现在一个 ThreadPoolExecutor：
+   core=0、max=512、SynchronousQueue、空闲 30 秒回收、线程名 inj-N，
+   下行泵也走同一个池（一条隧道两个线程，512 上限即 256 条并发隧道）；池满时直接关掉
+   新连接并在 lastError 里说明，不再无限堆线程。
+   实测一次派发 49688 ns → 4133 ns（约 12 倍）。200 条并发 + 300 次短连接压测全通。
+
+2. HTTP 头解析 → 原地扫描。
+   请求行用三个下标复刻原版 split(" ") 的语义（连续空格、行尾空格都一致），
+   请求头在同一段字符串上用 indexOf 扫一遍，不 split、不建行数组、不建 Map。
+   另外试过"连 String 都不建、直接在 byte[] 上扫"的版本：实测 259~331 ns，
+   反而比解码后 indexOf（202 ns）慢，因为 String.indexOf 是向量化的，手写字节
+   循环赢不了，所以没有采用。
+
+3. ini 边界判定 → 单趟扫描 + 跳转表。
+   原来 split("[\\r\\n]+") 每次都要编正则、建行数组，每行再 substring 两次；
+   现在一遍扫完，行尾/注释/等号三个下标一起认。字符判定 isTrim() 改成 switch
+   （javac 生成跳转表，一次间接跳转替代 7 次比较），unescape/escape 同样改跳转表。
+   实测一次解析 4934 ns → 2878 ns（1.7 倍）。
+
+二、表驱动，替掉字符串比较链
+1. 新增 model/Kinds：协议、传输、TLS 形态、三态策略、规则字段全部编成整数 id，
+   type()/net()/security()/policy()/field() 先按长度 switch 再查表，不再 8~12 次
+   equals 串成一条链。Node 把 kind()/netId()/secId() 缓存在节点上（引用变了才重算），
+   另加 fingerprint()（FNV-1a，24 个出站字段）。
+2. xray/Conf 的协议分支改成 5 张函数表（OUT / NET / SEC / RULE / WARN），
+   MATCHER、POLICY_TAG 同理；stream() 拆成 ws/grpc/streamOne/httpUpgrade/xhttp/kcp/
+   tls/reality；h2 与 quic 统一走 XHTTP stream-one，不再各留一套分支。
+3. 注入器 InjectServer：方法名 → (长度<<5 | 首字符) 查表定位；模板替换单趟扫描
+   （原来 8 次 replace）；头结束判定用 256 项状态转移表；http / 直连 / 网关三种
+   去向用 PATH/USE/GW 三维表分派；握手顺序用 ORDER 表取。
+4. HttpDns 去掉正则：firstV4 / isV4 / isIp 全部手写扫描 + 128 项字符集表；
+   Dns 编解码一次分配、一次算清长度。
+
+三、IO
+   请求头和握手状态行改成整块读。原来每读一个字节就是一次 socket read()，一个 700 字节
+   的头等于 700 次系统调用；现在按 512 字节一块读。多读的字节由自带的 BufIn 原地保留
+   （见第八节第 3 条），不再依赖 PushbackInputStream 的 unread。
+
+四、循环展开（6 处，替换 6 个固定次数循环）
+1. Boot.plain：UDP 的 A / AAAA 两轮（原 for (int type : QTYPE)）
+2. Boot.plain：TCP 的 A / AAAA 两轮
+3. Boot.dot：A / AAAA 两轮
+4. Boot.doh：A / AAAA 两轮
+5. Dns.firstRaw：答案段两条一轮（步长 2 展开）
+6. InjectServer.openConnect：模板 / 普通 CONNECT 两次尝试（原循环 + length 判断）
+
+五、删掉 / 合并
+   - Conf：XRAY_MARK 常量、重复的 h2/quic 分支。
+   - Engine：join() 死代码、自己那份 isIp（改用 HttpDns.isIp）。
+   - MainActivity：space() 死方法。
+   - Ini：stripComment / clean（新解析路径不再需要）。
+   - InjectServer：8 次 String.replace、httpmod 里重复的 trim/lowercase。
+
+六、实测（同一台机器、同一份驱动、两版字节码各跑 7 轮取最小，ns/次）
+   场景                          1.8.2      2.0.0      变化
+   请求行 + 头解析（700B）       1334.0      185.1    -86.1%
+   读请求头（700B）              5915.9     1305.4    -77.9%
+   模板渲染（4 个占位符）         295.1      133.6    -54.7%
+   http 头改写（去重/删头）      4234.7      748.2    -82.3%
+   状态行解析                      24.9       14.6    -41.4%
+   ini 解析                      4933.7     2878.0    -41.7%
+   线程派发（每条连接）         49687.9     4132.9    -91.7%
+   DNS 查询报文编码                79.1       69.9    -11.6%
+   IP 字面量判定                   17.4       12.0    -31.0%
+   一条 http 请求（解析+改写+渲染）约 5.8 微秒 → 1.07 微秒。
+
+七、静态分支账（javap -c -p 统计 if* / switch，不含 goto）
+   方法数 887 → 982；有分支方法 457 → 514；分支指令（不含类初始化）2184 → 2262。
+   - 既有代码净减 10 条（+81 −91）：Conf −55、Node −10、Engine −7、MainActivity −7、
+     Links −4、Boot −3、Profile −3、EditActivity −1；InjectServer +31（线程池与池满拒绝）、
+     HttpDns +22、Ini +10、Req +10、Dns +5、Store +1。
+   - 新增 Kinds 46 + NodeSync 18 + BufIn 24 = 88 条；Kinds/NodeSync 只在类初始化与
+     启动对账，BufIn 是块读缓冲的状态判定，都不在"每条连接重复比较字符串"的位置上。
+   - 单个有分支方法的平均分支数 4.78 → 4.40，p95 15 → 12，
+     超过 20 条的方法 16 → 11，最大 51 → 47。
+   方法拆小后方法数变多，静态分支总数因此不是单调下降；请求路径上实际执行的分支数
+   下降体现在第六节的实测里。
+
+八、2.0.0 最终核查（与 1.8.2 对拍）
+   交付前做了一次逐字段语义核查，发现并修掉三处真实缺陷，另加固一处边界：
+
+   1. 路由规则字段映射错位（严重）。
+      Kinds.field() 的 switch(len) 按 xray 的 JSON 键名（domainSuffix / inboundTag /
+      domainKeyword / domainRegex）写的长度，实际输入是 Rule 的序列化值
+      （domain_suffix / inbound / domain_keyword / domain_regex），长度对不上；
+      "geoip" 是 5 个字符却写在 case 6。结果：
+        - domain_suffix（默认规则字段）→ 落到兜底，生成 "domain:" + "domain:xxx"，
+          精确匹配代替后缀匹配，规则基本不生效；
+        - geoip → 生成 domain 规则，分流整片错乱；
+        - domain_keyword / domain_regex / inbound 同样落空。
+      改为按真实长度分派（5=geoip、7=geosite/process/network/inbound、
+      12=domain_regex、13=domain_suffix、14=domain_keyword），并补了 12 条断言，
+      逐个字段核对 key 与前缀。之前只断言 domain:a.com，而错误分支恰好也产出
+      domain:a.com，所以没被发现。
+
+   2. 导入完整 JSON 配置时 shadowsocks 出站被整条丢弃。
+      Kinds.type() 只认 "ss"，xray 自己的协议名是 "shadowsocks"（11 个字符），
+      没有对应分支，落到 UNKNOWN 后解析器返回 null。补上别名映射。
+
+   3. CONNECT 后紧跟的数据偶发丢失（TLS ClientHello 场景）。
+      块读一次读 512 字节，头结束后多读的字节用 PushbackInputStream.unread 回退。
+      实测在“一次读到 80 字节、回退 21 字节”这种情况下，read 会阻塞到 5 秒超时，
+      回退的字节读不出来，隧道里第一个 TLS 包丢失。改成自带缓冲的 BufIn：
+      多读的字节原地留在 buf[pos..len)，pumpUp / 下一个请求从同一缓冲继续消费，
+      不再有 unread 的歧义，也省一次拷贝。新增两条断言（早期数据、1200 字节长头）。
+
+   4. BufIn.unread 的兜底（加固，非线上缺陷）。
+      旧写法 `if (pos > 0) buf[--pos] = b;` 在 pos==0 时会静默丢字节，读到 EOF（-1）
+      时还会把 0xff 塞进缓冲。当前唯一调用点（swallowBlank）刚读完一个字节，
+      pos 至少为 1，走不到这两条路径；但既然是"回退"语义就不该有静默丢失：
+      现在 EOF 直接忽略，pos==0 时整体右移一格腾位置再放回。
+
+   核查方式（全部通过，0 差异），`tools/fuzz/run.sh` 一条命令可重跑：
+   * 配置生成：1270 组输入（协议 × 传输 × 安全 × root × 链式 × UDP × DNS × 规则 ×
+     rawJson），两版 Conf.build 的 JSON 规范化后逐字节比较 —— 1270/1270 一致。
+   * 链接与模型：94 组（六种协议链接、畸形链接、订阅文本、Node/Profile 序列化往返、
+     ini 配置导入、完整 JSON 配置），反射比较全部 public 字段 —— 除新增的
+     udpSrc* 字段与随机 id（已在对照表里豁免）外，0 差异。
+   * ini 解析：2 万条随机/畸形输入，与 1.8.2 逐字段对拍 —— 0 差异。
+   * 请求解析：2 万条随机/畸形请求行与头 —— 0 差异。
+   * 注入器运行时：8 个场景（早期数据、1200 字节长头、半关闭、分片写、http 改写、
+     keep-alive 两请求、POST body 含 "GET "、http_del 去重），两版分别起实例，
+     比较客户端与上游收到的字节 —— 8/8 逐字节一致。
+   * 327 份 xray 配置逐份 `xray run -test` —— 327 通过 / 0 失败。
+   * 单元/集成断言 255 条、并发 200 + 300 短连接 —— 全绿。
+
+   已知且有意保留的行为差异（都是修 bug，不是回归）：
+   * isPrivateHost("2001:db8::1")：1.8.2 误判为内网（"无点即内网"排在 v6 判断之前），
+     2.0.0 判为公网。
+   * 规则值写成 "ext:geosite.dat:cn" 时，2.0.0 保留原样（由 sanitizeRawGeo 处理），
+     1.8.2 会拼成非法的 "geosite:ext:geosite.dat:cn"。
+   * UDP 承载节点副本会在启动时与列表对账（新增功能，见第十节）。
+
+九、UDP「直连节点」文案
+   改为：UDP 直接发往这个节点，延迟最低、不经过注入网关；如果这个节点本身也支持
+   免流（本来就在免流范围内，或由免流通道落地），这部分流量同样不走通用流量；
+   节点不带免流时才按普通流量计费。（原文案说的是"这部分流量不免流"。）
+
+十、节点副本跟着列表走
+   新增 model/NodeSync。选 UDP 承载节点时记下来源（profile + 下标 + 指纹），保存的是
+   全量副本。启动（Engine.start / Store.load）与订阅导入后调用 reconcile()：
+   来源节点还在、指纹变了，就用列表里的新配置覆盖副本；来源节点被删了，副本原样保留。
+   新节点不支持 UDP-over-TCP，或者 net 是 kcp/quic 时，自动把 udpViaInject 降级。
+
+十一、回归
+   * 单元/集成断言 255 条全绿；并发冒烟 200 并发 + 300 短连接全通。
+   * 2 万条随机/畸形 ini 与请求头分别与 1.8.2 逐字段对拍，0 差异。
+   * 327 份生成的 xray 配置逐份 `xray run -test` 全绿。
+   * APK 用包内证书重签，apksigner verify 通过（v2 + v3）。
+
+【1.8.2：五项改造】
+1. 删除 gost 引擎。它没有任何调用点（实际用的是注入协议 + xray），一并删掉
+   Node.GOST、gost 出站、Engine 里的 gost 进程分支、内核下载项与签名匹配；
+   老存档里的 gost 跳在 fromJson 时跳过，链照常能读。
+
+2. xray 配置页按协议分区。服务器 / 协议参数 / 传输方式 / 传输层安全 四张卡，
+   字段跟着协议与传输走：VLESS 只出 UUID / flow，VMess 出 alterId / scy，
+   SS 出 method，SOCKS / HTTP 出用户名；传输只显示当前 network 用得上的
+   （ws 的 path + Host、grpc 的 serviceName + authority、kcp 的 seed + 头伪装、
+   quic 的 key + 加密 + 头伪装、h2 / httpupgrade / xhttp 的 path + Host）；
+   TLS 出 sni / alpn / fp / allowInsecure，REALITY 出 pbk / sid / spx。
+   分区方式对齐 v2rayNG 的 CommonBasicFields / CommonNetworkFields /
+   CommonStreamSecurityFields。
+
+3. 注入协议增加 UDP 转换（cns 已删除）。单节点的注入配置里可选一个现有支持
+   UDP 的节点来承接 UDP，两种承载方式：经注入网关（保免流，节点连接用
+   sockopt.dialerProxy 走注入器）或直连该节点（低延迟）。链式配置不显示这个
+   卡片，避免和链路语义打架；UDP / QUIC 的路由在选中后自动改指 udp-out。
+   卡片放在注入页最上方，不用翻页找。
+
+4. 配置导入导出。完整 JSON 配置里的 ext:geosite.dat:cn / ext:geoip*.dat:cn
+   规则改成映射到内置 geosite: / geoip: 标签 —— 原来直接丢弃，会把「cn 直连」
+   整条规则变空，xray 因此拒绝启动（this rule has no effective fields）；
+   剥完没剩下任何匹配条件的规则直接去掉。wsSettings.host（xray 26 新字段）、
+   grpc authority、httpSettings、httpupgradeSettings、kcpSettings.header、
+   quicSettings 都能读进来。
+
+5. UI 尺寸。输入框与按钮统一 42dp 最小高度，卡片间距 10dp、按钮组内间距
+   8–10dp，链路芯片改 FlowLayout（三跳以上不再横向顶出屏幕），标题单行省略，
+   四个页面加 adjustResize，键盘弹出不再盖住输入框。
+
+6. 内核更新到 Xray 26.10.31，geoip.dat / geosite.dat 同源。
+   注意：Xray 26 已移除 h2 与 QUIC 传输，老节点按官方迁移路径用 XHTTP
+   stream-one 发出（h2 → H2、quic → H3 并补 alpn h3），导出链接仍保留原 net；
+   VLESS / Trojan 明文只允许连内网地址，编辑页会直接给出提示。
+
+7. 顺带修掉的问题：UDP 出站只在路由策略为「代理」时生成（原来选了节点但策略是
+   「丢弃」也会发一个没人用的 outbound）；VPN / root 两种模式下 generate 出的
+   配置都用 xray run -test 逐份验过。
+
+【1.8.0 的改动（基于 1.6.6）】
+
+最低 Android 8.0 / API 26，目标 API 34，arm64-v8a。
+构建：在本目录运行 build.ps1。工具链默认在上一级目录的 tpx-toolchain；
+其他位置用 TPX_WORKSPACE 指定其父目录，TPX_STAGE 指定 ASCII 构建缓存目录。
+构建链：aapt2 + javac --release 11 + d8 + zipalign + apksigner。
+
+本版基于 1.6.6：
+
+【root + xray 连不上节点】
+1. 不再给 xray 出站套 sockopt.mark = 255。Android 用 fwmark 选网络，自己盖一个
+   255 会让内核落到 `ip rule … unreachable`，root 模式下拨节点直接
+   connect: network is unreachable。root 模式 xray 是 uid 0，--uid-owner 0 已豁免。
+
+【bootstrap】
+2. Boot 支持 A + AAAA（先 A 后 AAAA）：v6-only 节点域名（只有 AAAA）以前永远
+   解析失败，现在能拿到 v6 字面量；UDP / TCP / DoT / DoH 四条路都覆盖。
+3. 解析失败不再一票否决启动：记一行日志，域名原样交给 xray 自己解析。
+4. 注入链路不钉后续节点域名：后面几跳是被注入器用 CONNECT 带出去的，免流网关
+   按域名放行，钉成 IP 后网关不转发（链式用不了的直接原因）。
+5. 解析器域名启动时钉成 IP：证书带该 IP 就直接写 IP 形态；不带（自建 DoH）
+   就走 dns-pin 出站 —— hosts 里是钉死的 IP，SNI 仍是域名，仍然走隧道。
+6. bootstrap 默认开启、默认服务器 223.5.5.5；开关开着但地址空着时也用它。
+
+【IPv6】
+7. queryStrategy 改为 UseIP（原来 UseIPv4 会把 AAAA 全丢）。注：xray 的
+   merge() 只要任一家有 IP 就成功，所以 A-only 域名不会因此失败。
+8. Dns 增加 AAAA 解析；HttpDns / Boot 四条路都 A→AAAA 回落。
+9. HttpDns 认 v6 字面量（isIp / hostOf / portOf 不再把 v6 的冒号当端口分隔符）。
+10. 注入器本地 DNS 服务按 qtype 回 A/AAAA；修问题段回显少 4 字节（原来应答是坏包）。
+11. root 模式：转发链的上行豁免改成 v4 + v6 两张路由表各取默认网卡，v6 回来的包
+    不再被 TPROXY 劫走；v6 策略「丢弃」时加 filter 表兜底 DROP（TP6_FWD），
+    停止时随其它链一起清掉。
+
+【DNS 页 / UI】
+12. 预置按钮换回域名写法（dns.alidns.com / doh.pub / cloudflare-dns.com），
+    介绍文字按"启动时钉 IP"的新行为重写。
+13. 预置按钮条改成固定每行 3 个等宽行，不再用 FlowLayout 自己算换行；卡片与
+    按钮条不再裁剪子视图，描边不会被下一层盖住。
+
+【自检】
+14. 启动后直连节点地址探一次，并打印 v4 / v6 默认路由（root 模式）：
+    "自检：节点 xxx:port → 通（xx ms）"。
+
+third_party/hev-socks5-tunnel-2.19.3-src.zip 来源：
+https://github.com/heiher/hev-socks5-tunnel tag 2.19.3。
+无 Gradle、无测试副本、无构建产物。

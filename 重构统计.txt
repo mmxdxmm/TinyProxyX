@@ -1,0 +1,124 @@
+TinyProxy X 2.0.1 —— 分支与性能统计
+
+2.0.2（增量，只动 inject/InjectServer）
+  * 分派表 USE / GW / PATH 改成各自整表初始化（类初始化 39 → 45 条）；
+    statusOf 增加「数字后面遇到空白/行尾就收尾」的判定（+3）。
+  * 同一套工具链（本机 javac + tools/bytecode_branches.py）实测：
+        分支指令（不含初始化）  2.0.1 2301 → 2.0.2 2311
+        InjectServer.class      244 → 254
+    其它 64 个 class 的分支数一个都没变。
+  * 注：下面表里的 2262 是 2.0.0 交付时用另一版 javac 统计的，绝对值不可跨工具链
+    比较；增量请以上面这组同工具链数字为准。
+
+统计口径
+  * 2.0.1 只改了主页停止按钮的中间态（MainActivity.refresh 的一个状态分支 +
+    两句文案），分支指令 2262 与 2.0.0 完全相同，性能未受影响，下表两组数字通用。
+  * 分支指令：javap -c -p 里的 if* / if_icmp* / if_acmp* / ifnull / ifnonnull 与
+    tableswitch / lookupswitch（一次间接跳转算一条），不含无条件 goto。
+  * <clinit>（类初始化）单列，不计入下面的逐类对比。
+  * 性能：同一份 Java 驱动分别链接 1.8.2 与 2.0.0 的 class，同一台机器、
+    每项 7 轮取最小值，单位 ns/次。
+  * 复现：tools/bytecode_branches.py <classes 目录> [--no-clinit]
+
+一、总量
+                          1.8.2      2.0.0
+   方法数                    887        982
+   有分支的方法              457        514
+   分支指令（不含初始化）    2184       2262      +78
+   另有类初始化里的分支         0         39      +39（Kinds/NodeSync 的查表初始化）
+
+   拆分：新增文件 Kinds 46 + NodeSync 18 + BufIn 24 = +88；
+         既有文件 +81 − 91 = −10。也就是说"原有代码"的分支是净减的，
+         总量上升全部来自三个新类（两个表 + 一个块读缓冲）。
+
+   每个有分支方法的平均分支数   4.78 → 4.40
+   p95                          15   → 12
+   分支数 > 20 的方法            16   → 11
+   单方法最多分支                51   → 47（Conf.stream 51 → Engine.start 47）
+
+二、逐类（不含类初始化，正数 = 增加）
+   类名                            1.8.2  2.0.0    变化
+   Conf                              279    224    -55
+   Node                               59     49    -10
+   Engine                            128    121     -7
+   MainActivity                      114    107     -7
+   Links                             193    189     -4
+   Boot                               89     86     -3
+   Profile                            43     40     -3
+   EditActivity                      215    214     -1
+   InjectServer$5                      1      0     -1
+   —— 既有代码小计                   —      —      -10
+   Kinds                               0     46    +46
+   BufIn（InjectServer 内部类）        0     24    +24
+   NodeSync                            0     18    +18
+   InjectServer                      177    208    +31
+   HttpDns                           106    128    +22
+   Ini                                48     58    +10
+   Req（InjectServer 内部类）           4     14    +10
+   Dns                                37     42     +5
+   Store                              17     18     +1
+   Conf$Hop                            0      1     +1
+   InjectServer$6                      0      1     +1
+   —— 合计                          2184   2262    +78
+
+   静态条数不是单调下降，原因有三，都不在"每条连接都要走一遍"的路径上：
+   1) 热路径被拆成一批单职责小方法，每个都带自己的边界检查，方法数 +95；
+   2) Kinds / NodeSync / BufIn 是新增的表与缓冲，88 条里没有一条在字符串比较链上；
+   3) 线程池的池满拒绝、请求行 split 语义补齐、ini 新扫描循环各带来几条。
+   真正的开销看每次调用执行了多少条，见第三节。
+
+三、性能实测（ns/次）
+   场景                          1.8.2      2.0.0      变化
+   请求行 + 头解析（700 字节）   1334.0      185.1    -86.1%
+   读请求头（700 字节）          5915.9     1305.4    -77.9%
+   模板渲染（4 个占位符）         295.1      133.6    -54.7%
+   http 头改写（去重/删头）      4234.7      748.2    -82.3%
+   状态行解析                      24.9       14.6    -41.4%
+   ini 解析                      4933.7     2878.0    -41.7%
+   线程派发（每条连接）         49687.9     4132.9    -91.7%
+   DNS 查询报文编码                79.1       69.9    -11.6%
+   IP 字面量判定                   17.4       12.0    -31.0%
+
+   一条 http 请求（解析 + 改写 + 渲染）合计约 5.8 微秒 → 1.07 微秒。
+
+四、三个耗时大头的处理
+   ① 每连接建线程      原：accept 一个 new Thread，下行泵再 new 一个（每请求 2 个线程）
+                       现：ThreadPoolExecutor(0, 512, 30s, SynchronousQueue)，上下行共用
+                       实测派发 49688 → 4133 ns；200 并发 + 300 短连接压测全通
+   ② HTTP 头解析       原：整段解码后 split("\r\n") 建行数组，再 split(" ") 建词数组
+                       现：整段解码一次，在同一 String 上 indexOf 原地扫描，不建数组
+                       试过 byte[] 直接扫描：259~331 ns，比 String 路径 202 ns 慢，未采用
+   ③ ini 边界判定      原：split("[\r\n]+") 编正则 + 建数组，逐行 substring，isTrim 7 次比较
+                       现：单趟扫描（行尾/#/ = 三个下标），isTrim/unescape/escape 改跳转表
+                       实测 4934 → 2878 ns
+
+五、循环展开清单（6 处，替换 6 个固定次数循环，展开成 12 个直线调用点）
+   1. Boot.plain   UDP  A / AAAA 两轮      原 for (int type : QTYPE)
+   2. Boot.plain   TCP  A / AAAA 两轮      同上（第二条路径）
+   3. Boot.dot     A / AAAA 两轮           同上
+   4. Boot.doh     A / AAAA 两轮           同上
+   5. Dns.firstRaw 答案段两条一轮          原逐条推进，改 i += 2
+   6. InjectServer.openConnect 两次握手    原 for (int k : order) + 长度判断
+
+   另外 5 处"把分支换成查表"（不算展开，效果同类）：
+   - InjectServer.methodId：(长度<<5 | 首字符) → 8×32 表
+   - InjectServer.BufIn.head：256 项状态转移表认头结束
+   - InjectServer PATH/USE/GW/ORDER：三维、四维分派表
+   - Conf OUT/NET/SEC/RULE/WARN：五张函数表
+   - Ini isTrim/unescape/escape：javac 跳转表（tableswitch/lookupswitch）
+
+六、语义核查（与 1.8.2 差分对拍，全部 0 差异）
+   tools/fuzz/run.sh 一条命令跑完：
+   * 配置生成 ConfDiff：1270 组输入，JSON 规范化后逐字节比较 —— 0 差异
+   * 链接与模型 ModelDiff：94 组（六协议链接、畸形链接、订阅、Node/Profile 往返、
+     ini 导入、完整 JSON 配置），反射比较全部 public 字段 —— 0 差异（新版的 udpSrc*
+     三个字段与随机 id 已列入豁免清单）
+   * ini 解析 IniFuzz：2 万条随机/畸形输入 —— 0 差异
+   * 请求解析 ReqFuzz：2 万条随机/畸形请求行与头 —— 0 差异
+   * 注入器运行时 InjectDiff：8 个场景，两版各起实例比较线上字节 —— 8/8 一致
+
+七、回归
+   * 单元/集成断言 255 条，全绿（test/run.sh）。
+   * 并发冒烟：200 条并发 + 300 次短连接，全通（test/run.sh 第二段）。
+   * 327 份生成的 xray 配置逐份 `xray run -test`，全绿（test/dump.sh）。
+   * APK 用包内签名证书重签，apksigner verify 通过（v2 + v3）。
