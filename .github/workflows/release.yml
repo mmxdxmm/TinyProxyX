@@ -19,6 +19,19 @@ jobs:
       - name: Publish APK
         uses: softprops/action-gh-release@v2
         with:
+          name: TinyProxy X ${{ github.ref_name }}
+          body: |
+            Android 代理客户端，内置 Xray 内核，支持 VLESS / VMess / Trojan / Shadowsocks /
+            SOCKS5 / HTTP 与多跳链路。
+
+            - 运行方式：VPN（无需 root）/ 热点（root + TPROXY）
+            - 分流规则、分应用代理、DNS / UDP / QUIC / IPv6 策略
+            - 仅 arm64-v8a，Android 8.0 及以上
+
+            安装：下载 `TinyProxyX-*.apk` 直接安装。与 1.5.6 起各版本使用同一张证书，
+            可以直接覆盖升级，不用卸载旧版。
+
+            每个版本改了什么，见仓库里的 `说明.txt`。
           files: release/*.apk
           generate_release_notes: true
           fail_on_unmatched_files: true
