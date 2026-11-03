@@ -1,9 +1,57 @@
-TinyProxy X 2.0.2
+TinyProxy X 2.0.3
 
 最低 Android 8.0 / API 26，目标 API 34，arm64-v8a。
 构建：Windows 运行 build.ps1；Linux/macOS 运行 build.sh（同一套 aapt2 + javac
 --release 11 + d8 + zipalign + apksigner，工具链默认 /root/android-sdk 或
 ANDROID_SDK_ROOT 指向的目录）。
+
+【2.0.3：配置页对齐 v2rayNG，补齐 xray 协议字段】
+
+2.0.2 的编辑页只覆盖了最常用的一小撮字段，从 v2rayNG 导入的完整配置里
+KCP 的 seed/mtu/tti、XHTTP 的 mode/extra、gRPC 的 multi、VLESS 的 encryption、
+TLS 的 ECH / 证书 pin / 按名校验、REALITY 的 mldsa65Verify 全都没有落点，
+只能整份 JSON 原样跑。2.0.3 把这些字段补进模型、编辑页、链接解析与配置生成。
+
+新增到 Node / 编辑页 / Conf 的字段：
+
+    VLESS   encryption（含 mlkem768x25519plus.… 这串 VLESS Encryption）
+    KCP     seed、mtu、tti、header 伪装（迁到 finalmask 的 mkcp-legacy）
+    gRPC    mode = gun / multi（写 grpcSettings.multiMode）
+    XHTTP   mode = auto / packet-up / stream-up / stream-one，extra（JSON 对象）
+    QUIC    key（以前借用 path，现在独立字段；Xray 26 已移除该传输）
+    TLS     ECH（echConfigList）、verifyPeerCertByName、pinnedPeerCertSha256
+            （证书 pin 填 64 位十六进制，Xray 26 按 hex 解析，base64 会拒载）
+            （钉了证书时 allowInsecure 自动失效，语义与 v2rayNG 一致）
+    REALITY mldsa65Verify（Xray 25.9+ 的后量子验签串）
+    任意传输 finalmask 高级 JSON（写了就原样交给内核，覆盖自动生成的 KCP 伪装）
+    TCP     headerType = http 的伪装请求（path / Host 支持逗号分隔多值）
+
+KCP 的一处内核适配：Xray 26 把 kcpSettings.header 和 seed 删了，官方要求改用
+finalmask 的 mkcp-legacy；header/value 全留空才等于旧版默认 XOR。现在 KCP 节点
+无条件写一条 mkcp-legacy（有头伪装就写 header，有 seed 就写 value），
+kcpSettings 只留 mtu/tti —— 和 v2rayNG 的生成结果一致，也才能连上老服务端。
+
+兼容处理：
+    老存档 / 老链接把 KCP seed、QUIC key、gRPC serviceName 都存在 path 里，
+    读进来时会搬回各自字段并清空 path，升级后不用重填。
+    Node.toJson 只写偏离默认值的字段，老存档读写一遍不会平白变大。
+    链接参数名沿用 v2rayNG：seed / mtu / tti / mode / extra / fm / ech / vcn /
+    pcs / pqv / authority / serviceName，并兼容 insecure / allowInsecure /
+    allow_insecure 三种写法。
+
+界面：主界面右上角「热点」按钮改名「高级」（进入的还是热点 / 网卡代理页）。
+
+验证：
+    RefactorTest 324 条断言全绿（新增 58 条：字段落配置、TCP 伪装、pin 压
+    allowInsecure、越界值兜底、非法 JSON 容错、链接往返、老 path 迁移）；
+    并发冒烟 200 并发 + 300 短连接全通；
+    16 组老配置的生成结果与 2.0.2 逐字节比对，只有 3 组（两个 KCP +
+    一个 TCP+headerType=http）按预期变化，其余 13 组完全一致；
+    10 份真实配置交给 Xray 26.10.31 的 xray -test，全部 Configuration OK。
+
+注意：Xray 26 起，VLESS 不带 TLS/REALITY 时只允许连私网地址，公网地址必须在
+users[].encryption 里给 VLESS Encryption 串，否则内核直接拒载。这是内核策略，
+2.0.2 一样存在；2.0.3 补的 encryption 字段就是给这种情况用的。
 
 【2.0.2：修「http 由 https 槽接管」全挂】
 

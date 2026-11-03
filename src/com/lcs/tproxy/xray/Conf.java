@@ -85,7 +85,7 @@ public class Conf {
             throw new IllegalArgumentException("不支持的协议: " + n.type);
         };
 
-        NET[Kinds.NET_TCP] = (ss, n) -> false;
+        NET[Kinds.NET_TCP] = Conf::tcp;
         NET[Kinds.NET_WS] = Conf::ws;
         NET[Kinds.NET_GRPC] = Conf::grpc;
         NET[Kinds.NET_H2] = Conf::streamOne;
@@ -551,7 +551,8 @@ public class Conf {
         user.put("id", n.uuid);
         user.put("level", 0);
         if (n.kind() == Kinds.VLESS) {
-            user.put("encryption", "none");
+            /* 常规是 none；VLESS Encryption（mlkem768x25519plus.…）走同一个字段 */
+            user.put("encryption", empty(n.encryption) ? "none" : n.encryption);
             if (n.flow != null && n.flow.length() > 0) user.put("flow", n.flow);
         } else {
             user.put("alterId", n.alterId);
@@ -630,7 +631,44 @@ public class Conf {
         ss.put("network", net);
         boolean legacyQuic = NET[n.netId()].apply(ss, n);
         SEC[n.secId()].apply(ss, n, legacyQuic);
+        /* 手填的 finalmask 优先：它覆盖上面按 kcp 生成的那份（用户既然写了就以他为准）。 */
+        if (!empty(n.finalMask)) {
+            JSONObject fm = json(n.finalMask);
+            if (fm != null) ss.put("finalmask", fm);
+        }
         return ss;
+    }
+
+    /** 纯 TCP 没有传输参数，但 headerType=http 是「把流量伪装成 HTTP 请求」的老玩法，
+     *  v2rayNG 的 TCP 页里有这一项。只有 headerType 明确是 http 时才写，其余保持裸 TCP。 */
+    private static boolean tcp(JSONObject ss, Node n) throws Exception {
+        if (!"http".equals(n.headerType)) return false;
+        JSONObject req = new JSONObject();
+        req.put("version", "1.1");
+        req.put("method", "GET");
+        JSONArray paths = split(n.path);
+        if (paths.length() == 0) paths.put("/");
+        req.put("path", paths);
+        JSONObject headers = new JSONObject();
+        JSONArray hosts = split(n.hostHdr);
+        if (hosts.length() > 0) headers.put("Host", hosts);
+        req.put("headers", headers);
+        JSONObject header = new JSONObject();
+        header.put("type", "http");
+        header.put("request", req);
+        ss.put("tcpSettings", new JSONObject().put("header", header));
+        return false;
+    }
+
+    /** 逗号分隔的多值（path / Host 允许写多个，v2rayNG 也是这么切）。 */
+    private static JSONArray split(String v) {
+        JSONArray out = new JSONArray();
+        if (v == null) return out;
+        for (String x : v.split(",")) {
+            String s = x.trim();
+            if (s.length() > 0) out.put(s);
+        }
+        return out;
     }
 
     private static boolean ws(JSONObject ss, Node n) throws Exception {
@@ -647,6 +685,8 @@ public class Conf {
         JSONObject g = new JSONObject().put("serviceName", n.serviceName == null ? "" : n.serviceName);
         /* v2rayNG 把 gRPC 的 request host 映射到 authority */
         if (!empty(n.hostHdr)) g.put("authority", n.hostHdr);
+        /* multi 是 gRPC 的多路复用模式，服务端要同步开；gun 是默认单流，不必写。 */
+        if ("multi".equals(n.grpcMode)) g.put("multiMode", true);
         ss.put("grpcSettings", g);
         return false;
     }
@@ -676,25 +716,72 @@ public class Conf {
         JSONObject h = new JSONObject();
         h.put("path", empty(n.path) ? "/" : n.path);
         if (!empty(n.hostHdr)) h.put("host", n.hostHdr);
-        h.put("mode", "auto");
+        h.put("mode", xhttpMode(n.xhttpMode));
+        /* extra 是 XHTTP 自己的参数包（xmux、downloadSettings 等），只接受 JSON 对象；
+         * 手填坏了就当没填，不要让整份配置起不来。 */
+        if (!empty(n.xhttpExtra)) {
+            JSONObject ex = json(n.xhttpExtra);
+            if (ex != null) h.put("extra", ex);
+        }
         ss.put("xhttpSettings", h);
         return false;
     }
 
+    /** 宽松解析：拿不到 JSON 对象就返回 null（调用方按「没填」处理）。 */
+    private static JSONObject json(String text) {
+        try {
+            String s = text.trim();
+            if (!s.startsWith("{")) return null;
+            return new JSONObject(s);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** XHTTP 只有这四个 mode；链接里带了别的值就当 auto，别让内核拒载。 */
+    private static String xhttpMode(String mode) {
+        if ("packet-up".equals(mode) || "stream-up".equals(mode)
+                || "stream-one".equals(mode) || "auto".equals(mode)) {
+            return mode;
+        }
+        return "auto";
+    }
+
+    /** KCP：Xray 26 把 kcpSettings.header/seed 整个删了，只留 mtu/tti 这类链路参数；
+     *  头伪装和 seed 改由 finalmask 的 mkcp-legacy 描述。官方要求连老服务端必须显式写
+     *  mkcp-legacy（header/value 都留空 = 旧版默认 XOR），所以这里无条件写一条。 */
     private static boolean kcp(JSONObject ss, Node n) throws Exception {
-        ss.put("kcpSettings", new JSONObject().put("header",
-                new JSONObject().put("type", empty(n.headerType) ? "none" : n.headerType)));
+        String headerType = empty(n.headerType) ? "none" : n.headerType;
+        JSONObject k = new JSONObject();
+        /* 内核只认 576–1460 / 10–100，超出范围会直接拒载整份配置；这里按默认值兜底。 */
+        k.put("mtu", n.kcpMtu >= 576 && n.kcpMtu <= 1460 ? n.kcpMtu : 1350);
+        k.put("tti", n.kcpTti >= 10 && n.kcpTti <= 100 ? n.kcpTti : 50);
+        ss.put("kcpSettings", k);
+
+        JSONObject st = new JSONObject();
+        /* xray 的 mask 里这个头叫 wechat，链接和界面上的老名字是 wechat-video */
+        if (!"none".equals(headerType)) {
+            st.put("header", "wechat-video".equals(headerType) ? "wechat" : headerType);
+        }
+        if (!empty(n.kcpSeed)) st.put("value", n.kcpSeed);
+        JSONObject mask = new JSONObject().put("type", "mkcp-legacy");
+        if (st.length() > 0) mask.put("settings", st);
+        ss.put("finalmask", new JSONObject().put("udp", new JSONArray().put(mask)));
         return false;
     }
 
     private static void tls(JSONObject ss, Node n, boolean legacyQuic) throws Exception {
         JSONObject t = new JSONObject();
         t.put("serverName", empty(n.sni) ? n.host : n.sni);
-        t.put("allowInsecure", n.allowInsecure);
+        /* 钉了证书再跳过校验就等于把 pin 作废，和 v2rayNG 一致：有 pin 时强制校验证书。 */
+        t.put("allowInsecure", n.allowInsecure && empty(n.pinnedCA));
         JSONArray al = alpn(n.alpn);
         if (al.length() > 0) t.put("alpn", al);
         else if (legacyQuic) t.put("alpn", new JSONArray().put("h3"));
         if (!empty(n.fp)) t.put("fingerprint", n.fp);
+        if (!empty(n.ech)) t.put("echConfigList", n.ech);
+        if (!empty(n.verifyPeer)) t.put("verifyPeerCertByName", n.verifyPeer);
+        if (!empty(n.pinnedCA)) t.put("pinnedPeerCertSha256", n.pinnedCA);
         ss.put("security", "tls");
         ss.put("tlsSettings", t);
     }
@@ -713,6 +800,8 @@ public class Conf {
         r.put("publicKey", n.pbk);
         r.put("shortId", n.sid == null ? "" : n.sid);
         r.put("spiderX", empty(n.spx) ? "/" : n.spx);
+        /* Xray 25.9+ 的 REALITY 支持 ML-DSA-65 验签，填了才写。 */
+        if (!empty(n.mldsa)) r.put("mldsa65Verify", n.mldsa);
         ss.put("security", "reality");
         ss.put("realitySettings", r);
     }

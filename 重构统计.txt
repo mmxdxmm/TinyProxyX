@@ -1,4 +1,15 @@
-TinyProxy X 2.0.1 —— 分支与性能统计
+TinyProxy X 2.0.3 —— 分支与性能统计
+
+2.0.3（增量，只动协议字段相关的四个 class）
+  * 新增字段与生成逻辑集中在 Node / Conf / Links / EditActivity：
+        总分支指令        2.0.2 2311 → 2.0.3 2442   （+131）
+        Node.class          49 → 76
+        Conf.class         224 → 255
+        Links.class        189 → 257
+        EditActivity.class 214 → 219
+    其余 61 个 class 的分支数一个都没变；类初始化分支 45 条不变（未新增静态表）。
+  * 增量主要是链接参数的分支判断（kcp/quic/grpc/xhttp 各自一组）与配置生成里
+    「非空才写」的判空；没有新增循环，热路径（转发、注入）一行没动。
 
 2.0.2（增量，只动 inject/InjectServer）
   * 分派表 USE / GW / PATH 改成各自整表初始化（类初始化 39 → 45 条）；

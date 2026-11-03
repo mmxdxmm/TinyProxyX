@@ -96,7 +96,7 @@ public class MainActivity extends Activity implements Control.Watcher {
         titles.addView(t);
         titles.addView(Ui.text(this, "多协议链路 · Xray 内核", 11.5f, Ui.MUTED));
         header.addView(titles, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView rootBtn = Ui.pill(this, "热点", Ui.ACCENT_SOFT, Ui.ACCENT);
+        TextView rootBtn = Ui.pill(this, "高级", Ui.ACCENT_SOFT, Ui.ACCENT);
         TextView setBtn = Ui.pill(this, "设置", 0xFFF1F3F6, Ui.INK);
         LinearLayout.LayoutParams rm = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);

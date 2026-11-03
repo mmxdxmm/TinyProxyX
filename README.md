@@ -6,13 +6,14 @@
 - 包名：`com.lcs.tproxy`
 - 最低系统：Android 8.0（API 26），目标 API 34
 - 架构：`arm64-v8a`
-- 当前版本：**2.0.2**（versionCode 59）
+- 当前版本：**2.0.3**（versionCode 60）
 
 ## 功能
 
 | 分类 | 说明 |
 | --- | --- |
 | 协议 | VLESS、VMess、Trojan、Shadowsocks、SOCKS5、HTTP，支持把多个节点串成一条链（多跳） |
+| 协议参数 | 编辑页覆盖 v2rayNG 的常用字段：VLESS `encryption`、KCP `seed/mtu/tti`、gRPC `multi`、XHTTP `mode/extra`、TLS ECH / 证书 pin、REALITY `mldsa65Verify`、`finalmask`、TCP HTTP 伪装 |
 | 注入 | 独立的首跳类型：自定义 HTTP 首行与请求头模板，可只填 https 槽由 443 接管 80，也可 http/https 分槽处理 |
 | 运行方式 | **VPN 模式**：`VpnService` + 内置 hev-socks5-tunnel，无需 root；**热点模式**：root 下用 TPROXY，可把代理共享给热点设备 |
 | 路由 | 全局 / 绕过大陆 / 绕过局域网 / 自定义规则，支持分应用代理（白名单、黑名单） |
@@ -24,8 +25,8 @@
 ## 下载
 
 - 最新版本：[Releases](https://github.com/mmxdxmm/TinyProxyX/releases/latest)
-- 仓库内副本：[`release/TinyProxyX-2.0.2.apk`](release/TinyProxyX-2.0.2.apk)（16 MB）
-- SHA-256：`f8bb79f8b1a90df231d84c170669387ad18c9af56a09e3d19ecae682bf143d71`
+- 仓库内副本：[`release/TinyProxyX-2.0.3.apk`](release/TinyProxyX-2.0.3.apk)（16 MB）
+- SHA-256：`c5f6cad9be222bccfd4ba72455b5a7f1042916e60f5e1f1453da9d411628478a`
 - 签名证书 SHA-256：`f8766faafdb62fdf43be18f2ffe83d53647887508aefb8e0a00524943d5aa504`
   （与 1.5.6 起各版本同一张证书，可直接覆盖安装）
 
@@ -48,7 +49,7 @@
 ```bash
 export ANDROID_SDK_ROOT=/path/to/android-sdk   # 目录下要有 platforms/android-34 和 build-tools/34.0.0
 bash build.sh
-# 产物：build/TinyProxyX-2.0.2.apk
+# 产物：build/TinyProxyX-2.0.3.apk
 ```
 
 Windows 用 `build.ps1`（同一套流程，工具链路径按本机改，可用 `TPX_WORKSPACE` / `TPX_STAGE` 覆盖）。
@@ -79,6 +80,8 @@ bash test/run.sh
 ## 版本与更新日志
 
 见 [`说明.txt`](说明.txt)，按版本从新到旧记录每个改动的现象、根因和验证方式。
+
+2.0.3 把 Xray 协议配置项补齐到与 v2rayNG 一致：VLESS `encryption`、KCP `seed/mtu/tti`、gRPC `multi`、XHTTP `mode/extra`、TLS ECH / 证书 pin、REALITY `mldsa65Verify`、`finalmask`、TCP HTTP 伪装；主界面右上角「热点」按钮同时改名「高级」。
 
 2.0.2 修的是注入模式「80 端口交给 https 槽接管」时全部超时的问题：分派表 `PATH[0][1][1]` 漏填，导致该走 CONNECT 的连接走了直连隧道。
 

@@ -42,9 +42,11 @@ public final class RefactorTest {
         profiles();
         confProtocols();
         confStreams();
+        confAdvanced();
         confChains();
         confRouting();
         links();
+        linksAdvanced();
         nodeSync();
         System.out.println();
         System.out.println("checks=" + checks + " failed=" + failed);
@@ -856,6 +858,133 @@ public final class RefactorTest {
         }
     }
 
+    /** 2.0.3 补齐的字段：每项都要真的落到 xray 配置里，不然界面填了等于没填。 */
+    private static void confAdvanced() throws Exception {
+        section("Conf advanced");
+
+        /* VLESS encryption + KCP 的 seed/mtu/tti/头伪装（finalmask） */
+        Profile p = single(Node.VLESS);
+        Node n = p.chain.get(0);
+        n.encryption = "mlkem768x25519plus.native.600s.AAAA";
+        n.net = "kcp";
+        n.kcpSeed = "s3cr3t";
+        n.kcpMtu = 1200;
+        n.kcpTti = 30;
+        n.headerType = "wechat-video";
+        JSONObject out = Conf.build(p, settings(), false, 0)
+                .getJSONArray("outbounds").getJSONObject(0);
+        eq(out.getJSONObject("settings").getJSONArray("vnext").getJSONObject(0)
+                        .getJSONArray("users").getJSONObject(0).getString("encryption"),
+                "mlkem768x25519plus.native.600s.AAAA", "vless encryption");
+        JSONObject ss = out.getJSONObject("streamSettings");
+        eq(ss.getJSONObject("kcpSettings").getInt("mtu"), 1200, "kcp mtu");
+        eq(ss.getJSONObject("kcpSettings").getInt("tti"), 30, "kcp tti");
+        ok(!ss.getJSONObject("kcpSettings").has("header"), "kcp header 不再写进 kcpSettings");
+        ok(!ss.getJSONObject("kcpSettings").has("seed"), "kcp seed 不再写进 kcpSettings");
+        JSONObject mask = ss.getJSONObject("finalmask").getJSONArray("udp").getJSONObject(0);
+        eq(mask.getString("type"), "mkcp-legacy", "kcp mask type");
+        eq(mask.getJSONObject("settings").getString("header"), "wechat", "kcp mask header");
+        eq(mask.getJSONObject("settings").getString("value"), "s3cr3t", "kcp mask seed");
+
+        /* 不给头伪装、不给 seed 时也要写一条空的 mkcp-legacy：官方说这样才是旧版默认 XOR，
+         * 少了它连不上老服务端。 */
+        p = single(Node.VLESS);
+        n = p.chain.get(0);
+        n.net = "kcp";
+        n.headerType = "none";
+        n.kcpSeed = "";
+        ss = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings");
+        eq(ss.getJSONObject("finalmask").getJSONArray("udp").getJSONObject(0).getString("type"),
+                "mkcp-legacy", "kcp plain still has mask");
+        ok(!ss.getJSONObject("finalmask").getJSONArray("udp").getJSONObject(0).has("settings"),
+                "kcp plain mask has no settings");
+
+        /* 越界的 mtu/tti 会让内核拒载整份配置，这里要落回默认值 */
+        n.kcpMtu = 9000;
+        n.kcpTti = 1;
+        ss = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings");
+        eq(ss.getJSONObject("kcpSettings").getInt("mtu"), 1350, "kcp mtu clamped");
+        eq(ss.getJSONObject("kcpSettings").getInt("tti"), 50, "kcp tti clamped");
+
+        /* gRPC multi / XHTTP mode + extra */
+        p = single(Node.VLESS);
+        n = p.chain.get(0);
+        n.net = "grpc";
+        n.serviceName = "gs";
+        n.hostHdr = "auth.example";
+        n.grpcMode = "multi";
+        ss = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings");
+        eq(ss.getJSONObject("grpcSettings").getBoolean("multiMode"), true, "grpc multiMode");
+        eq(ss.getJSONObject("grpcSettings").getString("authority"), "auth.example", "grpc authority");
+
+        p = single(Node.VLESS);
+        n = p.chain.get(0);
+        n.net = "xhttp";
+        n.path = "/xh";
+        n.xhttpMode = "packet-up";
+        n.xhttpExtra = "{\"xmux\":{\"maxConcurrency\":\"16-32\"}}";
+        ss = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings");
+        eq(ss.getJSONObject("xhttpSettings").getString("mode"), "packet-up", "xhttp mode");
+        ok(ss.getJSONObject("xhttpSettings").has("extra"), "xhttp extra");
+
+        /* 非法的 extra / finalmask 不能把配置搞挂 */
+        n.xhttpExtra = "not json";
+        n.finalMask = "{broken";
+        ss = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings");
+        ok(!ss.getJSONObject("xhttpSettings").has("extra"), "bad extra ignored");
+        ok(!ss.has("finalmask"), "bad finalmask ignored");
+        n.xhttpMode = "bogus";
+        ss = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings");
+        eq(ss.getJSONObject("xhttpSettings").getString("mode"), "auto", "bad xhttp mode falls back");
+
+        /* TCP + headerType=http 的伪装请求 */
+        p = single(Node.VLESS);
+        n = p.chain.get(0);
+        n.net = "tcp";
+        n.headerType = "http";
+        n.path = "/a,/b";
+        n.hostHdr = "h1.com";
+        ss = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings");
+        JSONObject hdr = ss.getJSONObject("tcpSettings").getJSONObject("header");
+        eq(hdr.getString("type"), "http", "tcp header type");
+        eq(hdr.getJSONObject("request").getJSONArray("path").length(), 2, "tcp request paths");
+        eq(hdr.getJSONObject("request").getJSONArray("path").getString(1), "/b", "tcp second path");
+        eq(hdr.getJSONObject("request").getJSONObject("headers").getJSONArray("Host").getString(0),
+                "h1.com", "tcp request host");
+
+        /* TLS 三项 + reality mldsa + pin 压掉 allowInsecure */
+        p = single(Node.VLESS);
+        n = p.chain.get(0);
+        n.security = "tls";
+        n.sni = "s.example";
+        n.allowInsecure = true;
+        n.pinnedCA = "AAAA";
+        n.ech = "ech-config";
+        n.verifyPeer = "s.example";
+        JSONObject tls = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings").getJSONObject("tlsSettings");
+        eq(tls.getBoolean("allowInsecure"), false, "pin beats allowInsecure");
+        eq(tls.getString("echConfigList"), "ech-config", "tls ech");
+        eq(tls.getString("verifyPeerCertByName"), "s.example", "tls verifyPeer");
+        eq(tls.getString("pinnedPeerCertSha256"), "AAAA", "tls pinned cert");
+
+        p = single(Node.VLESS);
+        n = p.chain.get(0);
+        n.security = "reality";
+        n.pbk = "PK";
+        n.mldsa = "MLDSA";
+        JSONObject r = Conf.build(p, settings(), false, 0).getJSONArray("outbounds").getJSONObject(0)
+                .getJSONObject("streamSettings").getJSONObject("realitySettings");
+        eq(r.getString("mldsa65Verify"), "MLDSA", "reality mldsa");
+    }
+
     private static void confChains() throws Exception {
         section("Conf chains");
         Profile p = new Profile("chain");
@@ -1059,6 +1188,71 @@ public final class RefactorTest {
         ok(out.startsWith("vless://"), "export vless");
         String vmOut = Links.toLink(Links.parseLink(link));
         ok(vmOut.startsWith("vmess://"), "export vmess");
+    }
+
+    /* --------------------------------------------------------- links advanced */
+
+    /** v2rayNG 导出的链接里那些「这边以前没有」的参数，导入不能再丢。 */
+    private static void linksAdvanced() {
+        section("Links advanced");
+        String link = "vless://u@a.com:443?type=kcp&headerType=srtp&seed=sd&mtu=1200&tti=30"
+                + "&security=reality&pbk=K&sid=S&spx=%2Fsp&fp=chrome"
+                + "&ech=EC&vcn=a.com&pcs=PC&pqv=ML&flow=xtls-rprx-vision#adv";
+        Node n = Links.parseLink(link);
+        ok(n != null, "parse advanced vless");
+        eq(n.kcpSeed, "sd", "link kcp seed");
+        eq(n.kcpMtu, 1200, "link kcp mtu");
+        eq(n.kcpTti, 30, "link kcp tti");
+        eq(n.headerType, "srtp", "link kcp header");
+        eq(n.ech, "EC", "link ech");
+        eq(n.verifyPeer, "a.com", "link vcn");
+        eq(n.pinnedCA, "PC", "link pcs");
+        eq(n.mldsa, "ML", "link pqv");
+        eq(n.spx, "/sp", "link spx");
+
+        String back = Links.toLink(n);
+        ok(back.contains("seed=sd"), "export seed");
+        ok(back.contains("mtu=1200"), "export mtu");
+        ok(back.contains("pqv=ML"), "export pqv");
+        Node again = Links.parseLink(back);
+        ok(again != null, "reparse exported link");
+        eq(again.kcpSeed, "sd", "roundtrip seed");
+        eq(again.mldsa, "ML", "roundtrip mldsa");
+
+        /* gRPC：serviceName / authority / mode */
+        n = Links.parseLink("vless://u@a.com:443?type=grpc&serviceName=gs&authority=au&mode=multi#g");
+        eq(n.serviceName, "gs", "link grpc serviceName");
+        eq(n.hostHdr, "au", "link grpc authority");
+        eq(n.grpcMode, "multi", "link grpc mode");
+        back = Links.toLink(n);
+        ok(back.contains("serviceName=gs") && back.contains("authority=au"), "export grpc keys");
+
+        /* xhttp：splithttp 别名归一 + mode/extra */
+        n = Links.parseLink("vless://u@a.com:443?type=splithttp&path=%2Fx&mode=stream-up#x");
+        eq(n.net, "xhttp", "splithttp alias");
+        eq(n.xhttpMode, "stream-up", "link xhttp mode");
+
+        /* 旧版导出把 KCP seed 写在 path 里，升级后要能认出来 */
+        n = Links.parseLink("vless://u@a.com:443?type=kcp&path=oldseed#old");
+        eq(n.kcpSeed, "oldseed", "legacy path as kcp seed");
+        eq(n.path, "", "legacy path cleared");
+
+        /* 完整 JSON 配置里的新字段要能读进来 */
+        Profile cfg = Links.fromJsonConfig("{\"outbounds\":[{\"tag\":\"proxy\",\"protocol\":\"vless\","
+                + "\"settings\":{\"vnext\":[{\"address\":\"1.2.3.4\",\"port\":443,"
+                + "\"users\":[{\"id\":\"u\",\"encryption\":\"none\"}]}]},"
+                + "\"streamSettings\":{\"network\":\"xhttp\",\"security\":\"tls\","
+                + "\"xhttpSettings\":{\"path\":\"/x\",\"mode\":\"packet-up\","
+                + "\"extra\":{\"xmux\":{\"maxConcurrency\":16}}},"
+                + "\"tlsSettings\":{\"serverName\":\"s.com\",\"echConfigList\":\"EC\","
+                + "\"pinnedPeerCertSha256\":\"PC\",\"allowInsecure\":true}}}]}");
+        ok(cfg != null && cfg.chain.size() == 1, "parse advanced config");
+        Node c = cfg == null || cfg.chain.isEmpty() ? null : cfg.chain.get(0);
+        eq(c == null ? "" : c.xhttpMode, "packet-up", "config xhttp mode");
+        ok(c != null && c.xhttpExtra.contains("xmux"), "config xhttp extra");
+        eq(c == null ? "" : c.ech, "EC", "config ech");
+        eq(c == null ? "" : c.pinnedCA, "PC", "config pin");
+        eq(c != null && c.allowInsecure, true, "config insecure");
     }
 
     /* --------------------------------------------------------------- node sync */

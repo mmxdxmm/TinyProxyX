@@ -110,6 +110,30 @@ public class Node {
     public String headerType = "none";
     /** QUIC 传输自己的加密方式；不再和 TLS 的 sni 抢同一个字段 */
     public String quicSecurity = "none";
+    /** QUIC 传输的 key。1.8.x 借用 path 存过，读到老存档会搬回来。 */
+    public String quicKey = "";
+    /** VLESS 的 encryption。常规是 none；Xray 25+ 的 VLESS Encryption
+     *  （mlkem768x25519plus.… 那一长串）也走这个字段，导入的值必须原样保留。 */
+    public String encryption = "none";
+    /** gRPC 的 mode：gun（默认）/ multi */
+    public String grpcMode = "gun";
+    /** XHTTP 的 mode：auto / packet-up / stream-up / stream-one */
+    public String xhttpMode = "auto";
+    /** XHTTP 的 extra，一段 JSON 文本；非法 JSON 在生成配置时忽略 */
+    public String xhttpExtra = "";
+    /** KCP 的 seed / mtu / tti。1.8.x 借用 path 存过 seed。 */
+    public String kcpSeed = "";
+    public int kcpMtu = 1350;
+    public int kcpTti = 50;
+    /** TLS：ECH 配置、按名字校验证书、证书 pin（sha256，逗号分隔多个） */
+    public String ech = "";
+    public String verifyPeer = "";
+    public String pinnedCA = "";
+    /** REALITY 的 mldsa65Verify（后量子签名校验串） */
+    public String mldsa = "";
+    /** finalmask 高级 JSON（fragment / mkcp-legacy / salamander 等）。
+     *  非空时原样写进 streamSettings.finalmask，由用户自己对 JSON 负责。 */
+    public String finalMask = "";
     /** shadowsocks / trojan UDP-over-TCP: UDP rides inside the TCP tunnel */
     public boolean uot = false;
     /** raw legacy ini text for INJECT hops */
@@ -202,6 +226,19 @@ public class Node {
         n.serviceName = serviceName;
         n.headerType = headerType;
         n.quicSecurity = quicSecurity;
+        n.quicKey = quicKey;
+        n.encryption = encryption;
+        n.grpcMode = grpcMode;
+        n.xhttpMode = xhttpMode;
+        n.xhttpExtra = xhttpExtra;
+        n.kcpSeed = kcpSeed;
+        n.kcpMtu = kcpMtu;
+        n.kcpTti = kcpTti;
+        n.ech = ech;
+        n.verifyPeer = verifyPeer;
+        n.pinnedCA = pinnedCA;
+        n.mldsa = mldsa;
+        n.finalMask = finalMask;
         n.uot = uot;
         n.ini = ini;
         n.remark = remark;
@@ -270,10 +307,20 @@ public class Node {
                 .append('|').append(allowInsecure).append('|').append(net)
                 .append('|').append(path).append('|').append(hostHdr)
                 .append('|').append(serviceName).append('|').append(headerType)
-                .append('|').append(quicSecurity).append('|').append(uot);
+                .append('|').append(quicSecurity).append('|').append(quicKey)
+                .append('|').append(encryption).append('|').append(grpcMode)
+                .append('|').append(xhttpMode).append('|').append(xhttpExtra)
+                .append('|').append(kcpSeed).append('|').append(kcpMtu).append('|').append(kcpTti)
+                .append('|').append(ech).append('|').append(verifyPeer)
+                .append('|').append(pinnedCA).append('|').append(mldsa)
+                .append('|').append(finalMask).append('|').append(uot);
         long h = 0xcbf29ce484222325L;
         for (int i = 0; i < b.length(); i++) h = (h ^ b.charAt(i)) * 0x100000001b3L;
         return Long.toHexString(h);
+    }
+
+    private static boolean notEmpty(String s) {
+        return s != null && s.length() > 0;
     }
 
     public JSONObject toJson() {
@@ -305,6 +352,21 @@ public class Node {
             o.put("serviceName", serviceName);
             o.put("headerType", headerType);
             o.put("quicSecurity", quicSecurity);
+            /* 新增字段只在偏离默认值时落盘：老存档读进来再写回去，文件不会平白长大，
+             * 也不会因为多了几个空键被旧版本误读。 */
+            if (notEmpty(quicKey)) o.put("quicKey", quicKey);
+            if (notEmpty(encryption) && !"none".equals(encryption)) o.put("encryption", encryption);
+            if (notEmpty(grpcMode) && !"gun".equals(grpcMode)) o.put("grpcMode", grpcMode);
+            if (notEmpty(xhttpMode) && !"auto".equals(xhttpMode)) o.put("xhttpMode", xhttpMode);
+            if (notEmpty(xhttpExtra)) o.put("xhttpExtra", xhttpExtra);
+            if (notEmpty(kcpSeed)) o.put("kcpSeed", kcpSeed);
+            if (kcpMtu > 0 && kcpMtu != 1350) o.put("kcpMtu", kcpMtu);
+            if (kcpTti > 0 && kcpTti != 50) o.put("kcpTti", kcpTti);
+            if (notEmpty(ech)) o.put("ech", ech);
+            if (notEmpty(verifyPeer)) o.put("verifyPeer", verifyPeer);
+            if (notEmpty(pinnedCA)) o.put("pinnedCA", pinnedCA);
+            if (notEmpty(mldsa)) o.put("mldsa", mldsa);
+            if (notEmpty(finalMask)) o.put("finalMask", finalMask);
             o.put("uot", uot);
             o.put("ini", ini);
             o.put("remark", remark);
@@ -367,6 +429,33 @@ public class Node {
             }
         }
         n.uot = o.optBoolean("uot", false);
+        n.quicKey = o.optString("quicKey", "");
+        n.encryption = o.optString("encryption", "none");
+        if (n.encryption.length() == 0) n.encryption = "none";
+        n.grpcMode = o.optString("grpcMode", "gun");
+        n.xhttpMode = o.optString("xhttpMode", "auto");
+        n.xhttpExtra = o.optString("xhttpExtra", "");
+        n.kcpSeed = o.optString("kcpSeed", "");
+        n.kcpMtu = o.optInt("kcpMtu", 1350);
+        n.kcpTti = o.optInt("kcpTti", 50);
+        n.ech = o.optString("ech", "");
+        n.verifyPeer = o.optString("verifyPeer", "");
+        n.pinnedCA = o.optString("pinnedCA", "");
+        n.mldsa = o.optString("mldsa", "");
+        n.finalMask = o.optString("finalMask", "");
+        /* 1.8.x 把 KCP 的 seed、QUIC 的 key 都存在 path 里。这两个 net 下 path 本来
+         * 没有路径语义，读到老存档就搬回自己的字段并清空，免得两处各存一份。 */
+        if ("kcp".equals(n.net)) {
+            if (n.kcpSeed.length() == 0 && n.path.length() > 0) {
+                n.kcpSeed = n.path;
+                n.path = "";
+            }
+        } else if ("quic".equals(n.net)) {
+            if (n.quicKey.length() == 0 && n.path.length() > 0) {
+                n.quicKey = n.path;
+                n.path = "";
+            }
+        }
         n.ini = o.optString("ini", "");
         n.remark = o.optString("remark", "");
         JSONObject u = depth < 2 ? o.optJSONObject("udpNode") : null;

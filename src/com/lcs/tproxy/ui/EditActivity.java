@@ -417,11 +417,13 @@ public class EditActivity extends Activity {
         String t = n.type;
         if (Node.VLESS.equals(t)) {
             field(c, "UUID", "uuid", n.uuid, false);
+            field(c, "encryption（常规填 none）", "encryption", n.encryption, false);
             selectField(c, "flow", "flow", n.flow,
                     new String[]{"留空（不使用 flow）", "xtls-rprx-vision", "xtls-rprx-vision-udp443"},
                     new String[]{"", "xtls-rprx-vision", "xtls-rprx-vision-udp443"}, null);
-            c.addView(Ui.text(this, "加密：none（xray 客户端固定，无需修改）", 11.5f, Ui.MUTED),
-                    Ui.lp(this, -1, -2, 0, 8, 0, 0));
+            c.addView(Ui.text(this, "encryption 常规填 none；VLESS Encryption 的那一长串"
+                            + "（mlkem768x25519plus.…）原样贴进来即可。",
+                    11.5f, Ui.MUTED), Ui.lp(this, -1, -2, 0, 8, 0, 0));
         } else if (Node.VMESS.equals(t)) {
             field(c, "UUID", "uuid", n.uuid, false);
             field(c, "alterId（0 = 关闭旧版 AEAD）", "alterId", String.valueOf(n.alterId), false);
@@ -471,6 +473,9 @@ public class EditActivity extends Activity {
         } else if ("grpc".equals(net)) {
             field(c, "serviceName", "serviceName", n.serviceName, false);
             field(c, "authority（可留空）", "hostHdr", n.hostHdr, false);
+            selectField(c, "gRPC mode", "grpcMode", n.grpcMode,
+                    new String[]{"gun（单流，默认）", "multi（多路复用，服务端要同开）"},
+                    new String[]{"gun", "multi"}, null);
         } else if ("h2".equals(net) || "http".equals(net)) {
             field(c, "path（HTTP/2 路径）", "path", n.path, false);
             field(c, "Host（可留空）", "hostHdr", n.hostHdr, false);
@@ -483,14 +488,24 @@ public class EditActivity extends Activity {
         } else if ("xhttp".equals(net)) {
             field(c, "path", "path", n.path, false);
             field(c, "Host（可留空）", "hostHdr", n.hostHdr, false);
-            c.addView(Ui.text(this, "mode = auto（跟随服务端，暂不单独暴露）", 11.5f, Ui.MUTED),
-                    Ui.lp(this, -1, -2, 0, 8, 0, 0));
+            selectField(c, "mode", "xhttpMode", n.xhttpMode,
+                    new String[]{"auto（跟随服务端）", "packet-up", "stream-up", "stream-one"},
+                    new String[]{"auto", "packet-up", "stream-up", "stream-one"}, null);
+            areaField(c, "extra（JSON，可留空）", "xhttpExtra", n.xhttpExtra, 3);
+            c.addView(Ui.text(this, "extra 用于 xmux、downloadSettings 这类高级参数，"
+                            + "填一段 JSON 对象即可；格式错误会被忽略，不会导致启动失败。",
+                    11.5f, Ui.MUTED), Ui.lp(this, -1, -2, 0, 8, 0, 0));
         } else if ("kcp".equals(net)) {
-            field(c, "seed（可留空）", "path", n.path, false);
+            field(c, "seed（可留空）", "kcpSeed", n.kcpSeed, false);
+            field(c, "mtu（默认 1350）", "kcpMtu", String.valueOf(n.kcpMtu), false);
+            field(c, "tti（默认 50）", "kcpTti", String.valueOf(n.kcpTti), false);
             selectField(c, "KCP 头伪装", "headerType", n.headerType,
                     new String[]{"none", "srtp", "wechat-video", "dtls", "utp", "wireguard"}, null);
+            c.addView(Ui.text(this, "Xray 26 把 KCP 的头伪装和 seed 迁进了 finalmask"
+                            + "（mkcp-legacy），这里填的值会自动转过去，不用手写 JSON。",
+                    11.5f, Ui.MUTED), Ui.lp(this, -1, -2, 0, 8, 0, 0));
         } else if ("quic".equals(net)) {
-            field(c, "key（可留空）", "path", n.path, false);
+            field(c, "key（可留空）", "quicKey", n.quicKey, false);
             selectField(c, "QUIC 加密（security，已不生效）", "quicSecurity", n.quicSecurity,
                     new String[]{"none", "aes-128-gcm", "chacha20-poly1305"}, null);
             selectField(c, "QUIC 头伪装（已不生效）", "headerType", n.headerType,
@@ -499,9 +514,25 @@ public class EditActivity extends Activity {
                             + "XHTTP stream-one（H3，ALPN 补 h3）发出。",
                     11.5f, Ui.WARN), Ui.lp(this, -1, -2, 0, 8, 0, 0));
         } else {
-            c.addView(Ui.text(this, "纯 TCP，没有额外传输参数。", 11.5f, Ui.MUTED),
-                    Ui.lp(this, -1, -2, 0, 8, 0, 0));
+            selectField(c, "TCP 头伪装（headerType）", "headerType", n.headerType,
+                    new String[]{"none（裸 TCP）", "http（伪装成 HTTP 请求）"},
+                    new String[]{"none", "http"}, v -> {
+                        sync();
+                        n.headerType = v;
+                        render();
+                    });
+            if ("http".equals(n.headerType)) {
+                field(c, "path（伪装路径，逗号分隔可多个）", "path", n.path, false);
+                field(c, "Host（伪装 Host，逗号分隔可多个）", "hostHdr", n.hostHdr, false);
+            } else {
+                c.addView(Ui.text(this, "纯 TCP，没有额外传输参数。", 11.5f, Ui.MUTED),
+                        Ui.lp(this, -1, -2, 0, 8, 0, 0));
+            }
         }
+        areaField(c, "finalmask（高级 JSON，可留空）", "finalMask", n.finalMask, 3);
+        c.addView(Ui.text(this, "finalmask 写了就按原样交给 xray，覆盖上面生成的 KCP 伪装；"
+                        + "形如 {\"tcp\":[…],\"udp\":[…]}，不熟就留空。",
+                11.5f, Ui.MUTED), Ui.lp(this, -1, -2, 0, 8, 0, 0));
         form.addView(c, Ui.block(this, 0, 10));
     }
 
@@ -517,18 +548,32 @@ public class EditActivity extends Activity {
         if ("tls".equals(sec)) {
             field(c, "SNI（证书域名）", "sni", n.sni, false);
             field(c, "ALPN（h2,http/1.1）", "alpn", n.alpn, false);
-            field(c, "fingerprint（chrome/firefox/safari/randomized）", "fp", n.fp, false);
+            selectField(c, "fingerprint（uTLS）", "fp", n.fp,
+                    new String[]{"留空（不伪装）", "chrome", "firefox", "safari", "ios", "android",
+                            "edge", "360", "qq", "random", "randomized"},
+                    new String[]{"", "chrome", "firefox", "safari", "ios", "android",
+                            "edge", "360", "qq", "random", "randomized"}, null);
             switchRow(c, "跳过证书校验（allowInsecure）", n.allowInsecure, on -> {
                 n.allowInsecure = on;
             });
+            field(c, "ECH 配置（echConfigList，可留空）", "ech", n.ech, false);
+            field(c, "按名字校验证书（verifyPeerCertByName，可留空）", "verifyPeer", n.verifyPeer, false);
+            field(c, "证书 pin（pinnedPeerCertSha256，64 位十六进制，可留空）", "pinnedCA", n.pinnedCA, false);
+            if (n.pinnedCA != null && n.pinnedCA.length() > 0 && n.allowInsecure) {
+                c.addView(Ui.text(this, "钉了证书就不再跳过校验：pin 与 allowInsecure 同时开时，"
+                                + "allowInsecure 不生效（与 v2rayNG 一致）。",
+                        11.5f, Ui.WARN), Ui.lp(this, -1, -2, 0, 8, 0, 0));
+            }
         } else if ("reality".equals(sec)) {
             field(c, "SNI（对端伪装域名）", "sni", n.sni, false);
             field(c, "fingerprint（默认 chrome）", "fp", n.fp, false);
             field(c, "reality publicKey（pbk）", "pbk", n.pbk, false);
             field(c, "reality shortId（sid）", "sid", n.sid, false);
             field(c, "reality spiderX（默认 /）", "spx", n.spx, false);
-            c.addView(Ui.text(this, "REALITY 不做 CA 校验，allowInsecure 不参与。", 11.5f, Ui.MUTED),
-                    Ui.lp(this, -1, -2, 0, 8, 0, 0));
+            field(c, "mldsa65Verify（可留空）", "mldsa", n.mldsa, false);
+            c.addView(Ui.text(this, "REALITY 不做 CA 校验，allowInsecure 不参与。"
+                            + "mldsa65Verify 是 Xray 25.9+ 的后量子验签串，服务端没开就留空。",
+                    11.5f, Ui.MUTED), Ui.lp(this, -1, -2, 0, 8, 0, 0));
         } else {
             c.addView(Ui.text(this, "不加密。只有 tcp 才适合裸连，公共网络建议开 TLS 或 REALITY。",
                     11.5f, Ui.MUTED), Ui.lp(this, -1, -2, 0, 8, 0, 0));
@@ -1170,6 +1215,14 @@ public class EditActivity extends Activity {
         parent.addView(e, Ui.lp(-1, -2));
     }
 
+    /** 多行输入：JSON 这类会写很长、又需要看全的字段用。 */
+    private void areaField(LinearLayout parent, String label, String key, String value, int lines) {
+        parent.addView(Ui.text(this, label, 11.5f, Ui.MUTED), Ui.lp(this, -1, -2, 0, 8, 0, 4));
+        EditText e = Ui.area(this, "", value, lines);
+        fields.put(key, e);
+        parent.addView(e, Ui.lp(-1, -2));
+    }
+
     private interface BoolSink {
         void set(boolean on);
     }
@@ -1241,6 +1294,20 @@ public class EditActivity extends Activity {
         n.net = str("net", n.net);
         n.headerType = str("headerType", n.headerType);
         n.quicSecurity = str("quicSecurity", n.quicSecurity);
+        n.quicKey = str("quicKey", n.quicKey).trim();
+        n.encryption = str("encryption", n.encryption).trim();
+        if (n.encryption.length() == 0) n.encryption = "none";
+        n.grpcMode = str("grpcMode", n.grpcMode);
+        n.xhttpMode = str("xhttpMode", n.xhttpMode);
+        n.xhttpExtra = str("xhttpExtra", n.xhttpExtra).trim();
+        n.kcpSeed = str("kcpSeed", n.kcpSeed);
+        n.kcpMtu = num("kcpMtu", n.kcpMtu);
+        n.kcpTti = num("kcpTti", n.kcpTti);
+        n.ech = str("ech", n.ech).trim();
+        n.verifyPeer = str("verifyPeer", n.verifyPeer).trim();
+        n.pinnedCA = str("pinnedCA", n.pinnedCA).trim();
+        n.mldsa = str("mldsa", n.mldsa).trim();
+        n.finalMask = str("finalMask", n.finalMask).trim();
         n.path = str("path", n.path);
         n.hostHdr = str("hostHdr", n.hostHdr);
         n.serviceName = str("serviceName", n.serviceName);

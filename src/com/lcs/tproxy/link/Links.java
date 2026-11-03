@@ -151,6 +151,7 @@ public class Links {
             n.type = Node.VLESS;
             n.uuid = userInfo;
             n.flow = opt(p, "flow", "");
+            n.encryption = opt(p, "encryption", "none");
             n.net = opt(p, "type", "tcp");
             applyTransport(n, p);
             applyTls(n, p, scheme);
@@ -167,14 +168,51 @@ public class Links {
         return n;
     }
 
+    /** 链接里的传输参数。参数名按 v2rayNG 的写法：seed/mtu/tti 给 KCP，
+     *  mode/extra 给 XHTTP，mode/authority/serviceName 给 gRPC，key 给 QUIC。 */
     private static void applyTransport(Node n, Map<String, String> p) {
         String type = opt(p, "type", "tcp");
+        /* 分享链接里 xhttp 有时写成 splithttp，落到模型里统一成 xhttp */
+        if ("splithttp".equals(type)) type = "xhttp";
         n.net = type;
         n.path = opt(p, "path", "");
         n.hostHdr = opt(p, "host", "");
-        n.serviceName = opt(p, "serviceName", "");
+        if ("grpc".equals(type)) {
+            n.serviceName = opt(p, "serviceName", "");
+            n.hostHdr = opt(p, "authority", n.hostHdr);
+            n.grpcMode = "multi".equals(opt(p, "mode", "")) ? "multi" : "gun";
+        } else {
+            n.serviceName = opt(p, "serviceName", "");
+        }
         n.headerType = opt(p, "headerType", "none");
-        if (n.path.isEmpty() && type.equals("grpc")) n.path = "";
+        n.kcpSeed = opt(p, "seed", "");
+        n.kcpMtu = parseInt(opt(p, "mtu", "1350"), 1350);
+        n.kcpTti = parseInt(opt(p, "tti", "50"), 50);
+        n.quicSecurity = opt(p, "quicSecurity", "none");
+        n.quicKey = opt(p, "key", "");
+        String mode = opt(p, "mode", "");
+        if ("xhttp".equals(type) && mode.length() > 0) n.xhttpMode = mode;
+        n.xhttpExtra = opt(p, "extra", "");
+        n.finalMask = opt(p, "fm", "");
+
+        /* 2.0.2 及更早的导出把 KCP 的 seed、QUIC 的 key、gRPC 的 serviceName 都塞在
+         * path 里，这里收到老链接就搬回各自字段，别让老配置升级后连接不上。 */
+        if ("kcp".equals(type)) {
+            if (n.kcpSeed.length() == 0 && n.path.length() > 0) {
+                n.kcpSeed = n.path;
+                n.path = "";
+            }
+        } else if ("quic".equals(type)) {
+            if (n.quicKey.length() == 0 && n.path.length() > 0) {
+                n.quicKey = n.path;
+                n.path = "";
+            }
+        } else if ("grpc".equals(type)) {
+            if (n.serviceName.length() == 0 && n.path.length() > 0) {
+                n.serviceName = n.path;
+                n.path = "";
+            }
+        }
     }
 
     private static void applyTls(Node n, Map<String, String> p, String scheme) {
@@ -187,7 +225,14 @@ public class Links {
         n.pbk = opt(p, "pbk", "");
         n.sid = opt(p, "sid", "");
         n.spx = opt(p, "spx", "/");
-        n.allowInsecure = "1".equals(opt(p, "allowInsecure", "0"));
+        /* v2rayNG 的键名：ech / vcn / pcs / pqv；老的 allowInsecure 三种写法都认 */
+        n.ech = opt(p, "ech", "");
+        n.verifyPeer = opt(p, "vcn", "");
+        n.pinnedCA = opt(p, "pcs", "");
+        n.mldsa = opt(p, "pqv", "");
+        n.allowInsecure = "1".equals(opt(p, "insecure", "0"))
+                || "1".equals(opt(p, "allowInsecure", "0"))
+                || "1".equals(opt(p, "allow_insecure", "0"));
     }
 
     /* ---------------- vmess ---------------- */
@@ -213,6 +258,20 @@ public class Links {
             n.path = o.optString("path", "");
             n.vmessScy = o.optString("scy", "auto");
             n.vmessPcs = o.optString("pcs", "");
+            String mode = o.optString("mode", "");
+            /* vmess 链接把 gRPC 的 serviceName 放在 path、KCP 的 seed 也放在 path，
+             * 落到模型里要各归各位，否则生成配置时这两个值会丢。 */
+            if ("grpc".equals(n.net)) {
+                n.serviceName = n.path;
+                n.path = "";
+                n.grpcMode = "multi".equals(mode) ? "multi" : "gun";
+            } else if ("kcp".equals(n.net)) {
+                n.kcpSeed = n.path;
+                n.path = "";
+            } else if ("xhttp".equals(n.net)) {
+                if (mode.length() > 0) n.xhttpMode = mode;
+                n.xhttpExtra = o.optString("extra", "");
+            }
             String tls = o.optString("tls", "");
             n.security = tls.isEmpty() || "none".equalsIgnoreCase(tls)
                     ? "none" : ("reality".equalsIgnoreCase(tls) ? "reality" : "tls");
@@ -448,6 +507,9 @@ public class Links {
                 JSONArray alpn = tls.optJSONArray("alpn");
                 if (alpn != null && alpn.length() > 0) n.alpn = alpn.optString(0);
                 n.fp = tls.optString("fingerprint", "");
+                n.ech = tls.optString("echConfigList", "");
+                n.verifyPeer = tls.optString("verifyPeerCertByName", "");
+                n.pinnedCA = tls.optString("pinnedPeerCertSha256", "");
             }
             JSONObject reality = ss.optJSONObject("realitySettings");
             if (reality != null) {
@@ -456,6 +518,7 @@ public class Links {
                 n.spx = reality.optString("spiderX", "/");
                 n.sni = reality.optString("serverName", n.sni);
                 n.fp = reality.optString("fingerprint", n.fp);
+                n.mldsa = reality.optString("mldsa65Verify", "");
                 n.security = "reality";
             }
             JSONObject tcp = ss.optJSONObject("tcpSettings");
@@ -484,6 +547,7 @@ public class Links {
             if (grpc != null) {
                 n.serviceName = grpc.optString("serviceName", "");
                 n.hostHdr = grpc.optString("authority", n.hostHdr);
+                n.grpcMode = grpc.optBoolean("multiMode", false) ? "multi" : "gun";
             }
             JSONObject h2 = ss.optJSONObject("httpSettings");
             if (h2 != null) {
@@ -500,16 +564,42 @@ public class Links {
             if (xh != null) {
                 n.path = xh.optString("path", "");
                 n.hostHdr = xh.optString("host", "");
+                String mode = xh.optString("mode", "");
+                if (mode.length() > 0) n.xhttpMode = mode;
+                JSONObject ex = xh.optJSONObject("extra");
+                if (ex != null) n.xhttpExtra = ex.toString();
             }
             JSONObject kcp = ss.optJSONObject("kcpSettings");
             if (kcp != null) {
                 JSONObject hd = kcp.optJSONObject("header");
                 if (hd != null) n.headerType = hd.optString("type", n.headerType);
+                n.kcpMtu = kcp.optInt("mtu", n.kcpMtu);
+                n.kcpTti = kcp.optInt("tti", n.kcpTti);
+                n.kcpSeed = kcp.optString("seed", "");
+            }
+            /* 只有 kcpSettings 里没写 seed/头伪装时，才从 finalmask 里找回来 ——
+             * 这两处是同一份信息的新旧两种写法，谁有值用谁。 */
+            JSONObject fm = ss.optJSONObject("finalmask");
+            if (fm != null) {
+                n.finalMask = fm.toString();
+                JSONArray udp = fm.optJSONArray("udp");
+                if (udp != null) {
+                    for (int i = 0; i < udp.length(); i++) {
+                        JSONObject mask = udp.optJSONObject(i);
+                        if (mask == null || !"mkcp-legacy".equals(mask.optString("type", ""))) continue;
+                        JSONObject st = mask.optJSONObject("settings");
+                        if (st == null) continue;
+                        String h = st.optString("header", "");
+                        if (h.length() > 0) n.headerType = "wechat".equals(h) ? "wechat-video" : h;
+                        String v = st.optString("value", "");
+                        if (v.length() > 0 && n.kcpSeed.length() == 0) n.kcpSeed = v;
+                    }
+                }
             }
             JSONObject quic = ss.optJSONObject("quicSettings");
             if (quic != null) {
                 n.quicSecurity = quic.optString("security", "none");
-                n.path = quic.optString("key", n.path);
+                n.quicKey = quic.optString("key", "");
                 JSONObject hd = quic.optJSONObject("header");
                 if (hd != null) n.headerType = hd.optString("type", n.headerType);
             }
@@ -612,7 +702,19 @@ public class Links {
                 o.put("net", n.net);
                 o.put("type", n.headerType);
                 o.put("host", n.hostHdr);
-                o.put("path", n.path);
+                /* gRPC 的 serviceName、KCP 的 seed 在 vmess 链接里都叫 path */
+                if ("grpc".equals(n.net)) {
+                    o.put("path", n.serviceName);
+                    if ("multi".equals(n.grpcMode)) o.put("mode", "multi");
+                } else if ("kcp".equals(n.net)) {
+                    o.put("path", n.kcpSeed);
+                } else {
+                    o.put("path", n.path);
+                    if ("xhttp".equals(n.net)) {
+                        o.put("mode", n.xhttpMode);
+                        if (n.xhttpExtra.length() > 0) o.put("extra", n.xhttpExtra);
+                    }
+                }
                 o.put("tls", n.tls() ? "tls" : "");
                 o.put("sni", n.sni);
                 o.put("scy", n.vmessScy == null || n.vmessScy.length() == 0 ? "auto" : n.vmessScy);
@@ -637,24 +739,30 @@ public class Links {
             StringBuilder q = new StringBuilder();
             if (Node.VLESS.equals(n.type)) {
                 q.append("type=").append(n.net);
-                if (!n.path.isEmpty()) q.append("&path=").append(enc(n.path));
-                if (!n.hostHdr.isEmpty()) q.append("&host=").append(enc(n.hostHdr));
-                if (!n.serviceName.isEmpty()) q.append("&serviceName=").append(enc(n.serviceName));
+                appendTransportQuery(q, n);
+                if (!"none".equals(n.encryption) && n.encryption.length() > 0) {
+                    q.append("&encryption=").append(enc(n.encryption));
+                }
                 q.append("&security=").append(n.security);
                 if (!n.sni.isEmpty()) q.append("&sni=").append(enc(n.sni));
+                if (!n.alpn.isEmpty()) q.append("&alpn=").append(enc(n.alpn));
                 if (!n.fp.isEmpty()) q.append("&fp=").append(enc(n.fp));
                 if (!n.flow.isEmpty()) q.append("&flow=").append(enc(n.flow));
                 if (!n.pbk.isEmpty()) q.append("&pbk=").append(enc(n.pbk));
                 if (!n.sid.isEmpty()) q.append("&sid=").append(enc(n.sid));
+                if (!n.spx.isEmpty() && !"/".equals(n.spx)) q.append("&spx=").append(enc(n.spx));
+                appendTlsQuery(q, n);
                 if (n.allowInsecure) q.append("&allowInsecure=1");
                 return "vless://" + enc(n.uuid) + "@" + n.host + ":" + n.port + "?" + q + "#" + enc(n.title());
             }
             if (Node.TROJAN.equals(n.type)) {
                 q.append("type=").append(n.net);
-                if (!n.path.isEmpty()) q.append("&path=").append(enc(n.path));
-                if (!n.hostHdr.isEmpty()) q.append("&host=").append(enc(n.hostHdr));
+                appendTransportQuery(q, n);
                 if (!n.sni.isEmpty()) q.append("&sni=").append(enc(n.sni));
+                if (!n.alpn.isEmpty()) q.append("&alpn=").append(enc(n.alpn));
                 if (!n.fp.isEmpty()) q.append("&fp=").append(enc(n.fp));
+                appendTlsQuery(q, n);
+                if (n.allowInsecure) q.append("&allowInsecure=1");
                 return "trojan://" + enc(n.password) + "@" + n.host + ":" + n.port + "?" + q + "#" + enc(n.title());
             }
         } catch (Exception ignored) {
@@ -663,6 +771,45 @@ public class Links {
     }
 
     /* ---------------- helpers ---------------- */
+
+    /** 传输参数：只写属于当前 network 的那几个，键名跟 v2rayNG 保持一致。 */
+    private static void appendTransportQuery(StringBuilder q, Node n) {
+        String net = n.net == null ? "tcp" : n.net;
+        if ("grpc".equals(net)) {
+            if (!n.serviceName.isEmpty()) q.append("&serviceName=").append(enc(n.serviceName));
+            if (!n.hostHdr.isEmpty()) q.append("&authority=").append(enc(n.hostHdr));
+            if ("multi".equals(n.grpcMode)) q.append("&mode=multi");
+        } else if ("kcp".equals(net)) {
+            if (!n.kcpSeed.isEmpty()) q.append("&seed=").append(enc(n.kcpSeed));
+            if (n.kcpMtu != 1350) q.append("&mtu=").append(n.kcpMtu);
+            if (n.kcpTti != 50) q.append("&tti=").append(n.kcpTti);
+            if (!"none".equals(n.headerType)) q.append("&headerType=").append(enc(n.headerType));
+        } else if ("quic".equals(net)) {
+            if (!n.quicKey.isEmpty()) q.append("&key=").append(enc(n.quicKey));
+            if (!"none".equals(n.quicSecurity)) q.append("&quicSecurity=").append(enc(n.quicSecurity));
+            if (!"none".equals(n.headerType)) q.append("&headerType=").append(enc(n.headerType));
+        } else if ("tcp".equals(net)) {
+            if (!"none".equals(n.headerType)) q.append("&headerType=").append(enc(n.headerType));
+            if (!n.path.isEmpty()) q.append("&path=").append(enc(n.path));
+            if (!n.hostHdr.isEmpty()) q.append("&host=").append(enc(n.hostHdr));
+        } else {
+            if (!n.path.isEmpty()) q.append("&path=").append(enc(n.path));
+            if (!n.hostHdr.isEmpty()) q.append("&host=").append(enc(n.hostHdr));
+            if ("xhttp".equals(net)) {
+                if (!"auto".equals(n.xhttpMode)) q.append("&mode=").append(enc(n.xhttpMode));
+                if (!n.xhttpExtra.isEmpty()) q.append("&extra=").append(enc(n.xhttpExtra));
+            }
+        }
+        if (!n.finalMask.isEmpty()) q.append("&fm=").append(enc(n.finalMask));
+    }
+
+    /** TLS/REALITY 的高级项，键名沿用 v2rayNG 的 ech / vcn / pcs / pqv。 */
+    private static void appendTlsQuery(StringBuilder q, Node n) {
+        if (!n.ech.isEmpty()) q.append("&ech=").append(enc(n.ech));
+        if (!n.verifyPeer.isEmpty()) q.append("&vcn=").append(enc(n.verifyPeer));
+        if (!n.pinnedCA.isEmpty()) q.append("&pcs=").append(enc(n.pinnedCA));
+        if (!n.mldsa.isEmpty()) q.append("&pqv=").append(enc(n.mldsa));
+    }
 
     private static String b64(String s) {
         String t = s.replace(' ', '+');
